@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -10,6 +11,8 @@ import { Currency } from '../common/enums';
 
 @Injectable()
 export class WalletsService {
+  private readonly logger = new Logger(WalletsService.name);
+
   constructor(
     @InjectRepository(Wallet)
     private readonly walletsRepository: Repository<Wallet>,
@@ -20,11 +23,17 @@ export class WalletsService {
     const existing = await this.walletsRepository.find({
       where: { userId },
     });
-    if (existing.length >= 2) return existing;
+
+    const existingCurrencies = new Set(existing.map((w) => w.currency));
+    const missing = [Currency.NGN, Currency.USDT].filter(
+      (c) => !existingCurrencies.has(c),
+    );
+
+    if (missing.length === 0) return existing;
 
     try {
       const wallets = this.walletsRepository.create(
-        [Currency.NGN, Currency.USDT].map((currency) => ({
+        missing.map((currency) => ({
           userId,
           currency,
           balanceMinorUnits: 0,
@@ -56,11 +65,37 @@ export class WalletsService {
     });
   }
 
-  async updateBalance(
+  async credit(
     userId: string,
     currency: Currency,
     amount: number,
   ): Promise<Wallet> {
+    if (amount <= 0) {
+      throw new BadRequestException('Credit amount must be positive');
+    }
+    return this.updateBalance(userId, currency, amount);
+  }
+
+  async debit(
+    userId: string,
+    currency: Currency,
+    amount: number,
+  ): Promise<Wallet> {
+    if (amount <= 0) {
+      throw new BadRequestException('Debit amount must be positive');
+    }
+    return this.updateBalance(userId, currency, -amount);
+  }
+
+  private async updateBalance(
+    userId: string,
+    currency: Currency,
+    amount: number,
+  ): Promise<Wallet> {
+    if (!Number.isInteger(amount)) {
+      throw new BadRequestException('Amount must be an integer (minor units)');
+    }
+
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
@@ -79,24 +114,34 @@ export class WalletsService {
         throw new BadRequestException('Wallet not found');
       }
 
-      const newBalance = Number(wallet.balanceMinorUnits) + amount;
-
-      if (newBalance < 0) {
+      if (amount < 0 && BigInt(wallet.balanceMinorUnits) < BigInt(-amount)) {
         throw new BadRequestException('Insufficient balance');
       }
 
-      await queryRunner.manager.update(
+      await queryRunner.manager.increment(
         Wallet,
         { id: wallet.id },
-        { balanceMinorUnits: newBalance },
+        'balanceMinorUnits',
+        amount,
       );
+
+      const updated = await queryRunner.manager.findOneBy(Wallet, {
+        id: wallet.id,
+      });
 
       await queryRunner.commitTransaction();
 
-      return { ...wallet, balanceMinorUnits: newBalance };
+      return updated!;
     } catch (error) {
       await queryRunner.rollbackTransaction();
+
       if (error instanceof BadRequestException) throw error;
+
+      this.logger.error(
+        `Failed to update balance for user ${userId} / ${currency}: ${(error as Error).message}`,
+        (error as Error).stack,
+      );
+
       throw new InternalServerErrorException('Failed to update balance');
     } finally {
       await queryRunner.release();

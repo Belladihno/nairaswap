@@ -8,6 +8,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository, IsNull } from 'typeorm';
+import ms from 'ms';
 import { randomBytes, createHash } from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { UsersService } from '../users/users.service';
@@ -30,9 +31,7 @@ export class AuthService {
   ) {}
 
   async register(dto: RegisterDto) {
-    const email = dto.email.toLowerCase();
-
-    const existingUser = await this.usersService.findByEmail(email);
+    const existingUser = await this.usersService.findByEmail(dto.email);
     if (existingUser) {
       throw new ConflictException('Email already registered');
     }
@@ -45,7 +44,7 @@ export class AuthService {
           const user = await manager.save(User, {
             firstName: dto.firstName,
             lastName: dto.lastName,
-            email,
+            email: dto.email,
             passwordHash,
           });
 
@@ -58,7 +57,7 @@ export class AuthService {
         },
       );
 
-      const tokens = await this.generateTokens(user.id, email);
+      const tokens = await this.generateTokens(user.id, dto.email);
       return { user, ...tokens };
     } catch (err: unknown) {
       if ((err as { code?: string }).code === '23505') {
@@ -166,20 +165,7 @@ export class AuthService {
   }
 
   private parseExpiry(value: string): number {
-    const match = value.match(/^(\d+)(s|m|h|d)$/);
-    if (!match) return 7 * 24 * 60 * 60 * 1000;
-    const num = parseInt(match[1], 10);
-    switch (match[2]) {
-      case 's':
-        return num * 1000;
-      case 'm':
-        return num * 60 * 1000;
-      case 'h':
-        return num * 3600 * 1000;
-      case 'd':
-        return num * 86400 * 1000;
-      default:
-        return 7 * 86400 * 1000;
-    }
+    const result = ms(value as ms.StringValue);
+    return typeof result === 'number' ? result : 7 * 86400 * 1000;
   }
 }
